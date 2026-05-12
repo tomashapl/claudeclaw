@@ -1,2 +1,7 @@
 export { startWebUi } from "./server";
-export type { StartWebUiOptions, WebServerHandle, WebSnapshot } from "./types";
+export type {
+  ChatStreamSinks,
+  StartWebUiOptions,
+  WebServerHandle,
+  WebSnapshot,
+} from "./types";

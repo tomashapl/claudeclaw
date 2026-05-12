@@ -1,6 +1,6 @@
 import { htmlPage } from "./page/html";
 import { clampInt, json } from "./http";
-import type { StartWebUiOptions, WebServerHandle } from "./types";
+import type { ChatStreamSinks, StartWebUiOptions, WebServerHandle } from "./types";
 import { buildState, buildTechnicalInfo, sanitizeSettings } from "./services/state";
 import { readHeartbeatSettings, updateHeartbeatSettings } from "./services/settings";
 import { createQuickJob, deleteJob } from "./services/jobs";
@@ -163,12 +163,21 @@ export function startWebUi(opts: StartWebUiOptions): WebServerHandle {
               const send = (data: object) => {
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
               };
+              const sinks: ChatStreamSinks = {
+                onChunk: (chunk) => send({ type: "chunk", text: chunk }),
+                onUnblock: () => send({ type: "unblock" }),
+                onToolUse: (toolUseId, name, input) =>
+                  send({ type: "tool_use", id: toolUseId, name, input }),
+                onToolResult: (toolUseId, output, opts) =>
+                  send({
+                    type: "tool_result",
+                    id: toolUseId,
+                    output,
+                    isError: opts?.isError === true,
+                  }),
+              };
               try {
-                await onChat(
-                  message,
-                  (chunk) => send({ type: "chunk", text: chunk }),
-                  () => send({ type: "unblock" })
-                );
+                await invokeOnChat(onChat, message, sinks);
                 send({ type: "done" });
               } catch (err) {
                 send({ type: "error", message: String(err) });
@@ -200,4 +209,28 @@ export function startWebUi(opts: StartWebUiOptions): WebServerHandle {
     host: opts.host,
     port: server.port,
   };
+}
+
+/**
+ * Bridges the new sinks-object onChat signature with the legacy
+ * `(message, onChunk, onUnblock)` form. Looks at `Function.length` to decide
+ * which form the consumer registered — three positional params means legacy.
+ */
+async function invokeOnChat(
+  fn: NonNullable<StartWebUiOptions["onChat"]>,
+  message: string,
+  sinks: ChatStreamSinks,
+): Promise<void> {
+  if (fn.length >= 3) {
+    // Legacy: (message, onChunk, onUnblock) — accepted at runtime so older
+    // host code still works; public type only advertises the sinks form.
+    const legacy = fn as unknown as (
+      message: string,
+      onChunk: (text: string) => void,
+      onUnblock: () => void,
+    ) => Promise<void>;
+    await legacy(message, sinks.onChunk, sinks.onUnblock);
+    return;
+  }
+  await fn(message, sinks);
 }

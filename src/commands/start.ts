@@ -474,13 +474,16 @@ export async function start(args: string[] = []) {
             updateState();
             console.log(`[${ts()}] Jobs reloaded from Web UI`);
           },
-          onChat: async (message, onChunk, onUnblock) => {
+          onChat: async (message, sinks) => {
             const wizardCtx = { iface: "web" as const, scopeId: "default" };
             if (isWizardTrigger(message) || hasActiveWizard(wizardCtx)) {
-              onChunk(await handleWizardInput(wizardCtx, message));
+              sinks.onChunk(await handleWizardInput(wizardCtx, message));
               return;
             }
-            await streamUserMessage("chat", message, onChunk, onUnblock);
+            await streamUserMessage("chat", message, sinks.onChunk, sinks.onUnblock, {
+              onToolUse: sinks.onToolUse,
+              onToolResult: sinks.onToolResult,
+            });
           },
         });
       } catch (err) {

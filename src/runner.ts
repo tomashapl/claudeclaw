@@ -794,11 +794,26 @@ export async function run(
   return enqueue(() => execClaude(name, prompt, threadId, modelOverride, timeoutMs, agentName), threadId);
 }
 
+/**
+ * Optional sinks for structured stream-json events. UIs that render tool
+ * activity (HQ chat, etc.) wire `onToolUse` / `onToolResult`; CLI consumers
+ * that only care about text leave them undefined.
+ */
+export interface StreamToolSinks {
+  onToolUse?: (toolUseId: string, name: string, input: unknown) => void;
+  onToolResult?: (
+    toolUseId: string,
+    output: unknown,
+    opts?: { isError?: boolean },
+  ) => void;
+}
+
 async function streamClaude(
   name: string,
   prompt: string,
   onChunk: (text: string) => void,
-  onUnblock: () => void
+  onUnblock: () => void,
+  toolSinks?: StreamToolSinks,
 ): Promise<void> {
   await mkdir(LOGS_DIR, { recursive: true });
 
@@ -879,7 +894,13 @@ async function streamClaude(
           }
         } else if (event.type === "assistant") {
           // Text and tool_use blocks from the assistant
-          type ContentBlock = { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> };
+          type ContentBlock = {
+            type: string;
+            text?: string;
+            id?: string;
+            name?: string;
+            input?: Record<string, unknown>;
+          };
           const msg = event.message as { content?: ContentBlock[] } | undefined;
           const blocks = msg?.content ?? [];
           let hasActivity = false;
@@ -889,12 +910,50 @@ async function streamClaude(
               textEmitted = true;
               hasActivity = true;
             } else if (block.type === "tool_use") {
+              if (toolSinks?.onToolUse && block.id && block.name) {
+                try {
+                  toolSinks.onToolUse(block.id, block.name, block.input ?? {});
+                } catch {}
+              }
               hasActivity = true;
             }
           }
           if (hasActivity) maybeUnblock();
+        } else if (event.type === "user") {
+          // tool_result blocks come back as user-role messages — Claude feeding
+          // each tool's output into the next turn. Forward them so UIs can
+          // close out the matching tool_use card.
+          type ResultBlock = {
+            type: string;
+            tool_use_id?: string;
+            content?: unknown;
+            is_error?: boolean;
+          };
+          const msg = event.message as { content?: ResultBlock[] } | undefined;
+          const blocks = msg?.content ?? [];
+          for (const block of blocks) {
+            if (block.type === "tool_result" && block.tool_use_id) {
+              if (toolSinks?.onToolResult) {
+                try {
+                  toolSinks.onToolResult(block.tool_use_id, block.content, {
+                    isError: block.is_error === true,
+                  });
+                } catch {}
+              }
+            }
+          }
         } else if (event.type === "tool_use") {
           // Top-level tool_use event (some stream-json versions) — unblock the UI
+          if (toolSinks?.onToolUse) {
+            const id = event.id as string | undefined;
+            const toolName = event.name as string | undefined;
+            const input = event.input;
+            if (id && toolName) {
+              try {
+                toolSinks.onToolUse(id, toolName, input ?? {});
+              } catch {}
+            }
+          }
           maybeUnblock();
         } else if (event.type === "result") {
           // Final result event — emit text as fallback if no assistant text was seen
@@ -919,9 +978,12 @@ export async function streamUserMessage(
   name: string,
   prompt: string,
   onChunk: (text: string) => void,
-  onUnblock: () => void
+  onUnblock: () => void,
+  toolSinks?: StreamToolSinks,
 ): Promise<void> {
-  return enqueue(() => streamClaude(name, prefixUserMessageWithClock(prompt), onChunk, onUnblock));
+  return enqueue(() =>
+    streamClaude(name, prefixUserMessageWithClock(prompt), onChunk, onUnblock, toolSinks),
+  );
 }
 
 function prefixUserMessageWithClock(prompt: string): string {
